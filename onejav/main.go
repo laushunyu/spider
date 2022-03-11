@@ -15,12 +15,14 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
+	"github.com/fatih/color"
 	htmlPkg "github.com/laushunyu/spider/html"
 	log "github.com/sirupsen/logrus"
-	"golang.org/x/sync/errgroup"
+	"go.uber.org/multierr"
 	"golang.org/x/sync/semaphore"
 )
 
@@ -86,7 +88,7 @@ type Artifact struct {
 }
 
 func (a *Artifact) DownloadTo(dir string) error {
-	log.Infof("downloading artifact metainfo %s %s", a.ID, a.Name)
+	log.Debugf("downloading artifact metainfo %s %s", a.ID, a.Name)
 
 	if err := os.MkdirAll(dir, os.ModePerm); err != nil {
 		return err
@@ -120,17 +122,89 @@ func (a *Artifact) DownloadTo(dir string) error {
 			return err
 		}
 
-		eg := errgroup.Group{}
+		wg := sync.WaitGroup{}
+		var errRet error
 		for _, u := range a.ExtraImageUrl {
+			wg.Add(1)
 			imageUrl := u
 			_, file := path.Split(imageUrl)
-			eg.Go(func() error {
-				return htmlPkg.DoGetDownload(path.Join(dir, file), imageUrl)
-			})
+			go func() {
+				defer wg.Done()
+				errRet = multierr.Append(errRet, htmlPkg.DoGetDownload(path.Join(dir, file), imageUrl))
+			}()
 		}
-		if err := eg.Wait(); err != nil {
+		if wg.Wait(); errRet != nil {
 			return err
 		}
+	}
+
+	log.Infof("success to download artifact metainfo %s", color.GreenString("%s %s", a.ID, a.Name))
+	return nil
+}
+
+func (w *Website) DownloadAllArtifactsByDateTo(y, m, d int, artsDir string) error {
+	// mkdir
+	if err := os.MkdirAll(artsDir, os.ModePerm); err != nil {
+		log.Fatalln(err)
+	}
+
+	var arts []Artifact
+
+	// get cache from metadata.json
+	mdPath := filepath.Join(artsDir, "metadata.json")
+
+	mdRaw, err := ioutil.ReadFile(mdPath)
+	if err == nil {
+		// file exist, do unmarshal
+		if err := json.Unmarshal(mdRaw, &arts); err != nil {
+			// unmarshal fail, should download from remote
+			log.WithError(err).Warning("metadata broken, will download from remote website page")
+			err = os.ErrNotExist
+		}
+		log.Debugf("load list metadata.json cache success")
+	}
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return err
+		}
+		// not exist, download from website page
+
+		// get artifacts of specify date
+		a, err := w.GetArtifactsByDate(y, m, d, -1)
+		if err != nil {
+			log.Fatalln(err)
+		}
+		arts = a
+
+		artsRaw, err := json.MarshalIndent(a, "", "\t")
+		if err != nil {
+			return err
+		}
+		if err := ioutil.WriteFile(mdPath, artsRaw, 0644); err != nil {
+			return err
+		}
+	}
+
+	// download arts concurrently
+	log.Debugf("start downloading %d arts", len(arts))
+	var errRet error
+	wg, sema := sync.WaitGroup{}, semaphore.NewWeighted(concurrent)
+	for i := range arts {
+		wg.Add(1)
+		art := arts[i]
+
+		go func() {
+			defer wg.Done()
+
+			_ = sema.Acquire(context.TODO(), 1)
+			defer sema.Release(1)
+
+			errRet = multierr.Append(errRet, art.DownloadTo(filepath.Join(artsDir, art.ID)))
+		}()
+	}
+
+	if wg.Wait(); errRet != nil {
+		return err
 	}
 
 	return nil
@@ -155,7 +229,7 @@ func (w *Website) GetArtifactsByDate(y, m, d int, pageLimit int) (arts []Artifac
 
 		log.Infof("process page %s", u.String())
 		art, next, err := w.GetArtifactsFromHtml(respBody)
-		respBody.Close() // close body
+		_ = respBody.Close() // close body
 		if err != nil {
 			return arts, err
 		}
@@ -264,28 +338,12 @@ func main() {
 
 	website := NewWebsite(host)
 
+	// output/2022/3/11
 	y, m, d := date.Date()
-
-	// get artifacts of specify date
-	arts, err := website.GetArtifactsByDate(y, int(m), d, -1)
-	if err != nil {
-		panic(err)
-	}
-
-	// download arts concurrently
-	eg, sema := errgroup.Group{}, semaphore.NewWeighted(concurrent)
-	for i := range arts {
-		art := arts[i]
-
-		eg.Go(func() error {
-			sema.Acquire(context.TODO(), 1)
-			defer sema.Release(1)
-
-			return art.DownloadTo(filepath.Join(output, strconv.Itoa(y), strconv.Itoa(int(m)), strconv.Itoa(d), art.ID))
-		})
-	}
-
-	if err := eg.Wait(); err != nil {
+	artsDir := filepath.Join(output, strconv.Itoa(y), strconv.Itoa(int(m)), strconv.Itoa(d))
+	if err := website.DownloadAllArtifactsByDateTo(y, int(m), d, artsDir); err != nil {
 		log.Fatalln(err)
 	}
+
+	log.Info("success!")
 }
