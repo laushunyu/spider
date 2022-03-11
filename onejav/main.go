@@ -29,12 +29,14 @@ var (
 	host       string
 	date       time.Time
 	level      string
+	output     string
 )
 
 func init() {
 	flag.Int64Var(&concurrent, "p", 1, "concurrent of process")
 	flag.StringVar(&host, "h", host, "target website host")
 	flag.StringVar(&level, "level", "info", "log level")
+	flag.StringVar(&output, "o", "output", "output dir")
 	flag.Parse()
 
 	// set log level
@@ -279,7 +281,7 @@ func main() {
 			sema.Acquire(context.TODO(), 1)
 			defer sema.Release(1)
 
-			return art.DownloadTo(filepath.Join("output", strconv.Itoa(y), strconv.Itoa(int(m)), strconv.Itoa(d), art.ID))
+			return art.DownloadTo(filepath.Join(output, strconv.Itoa(y), strconv.Itoa(int(m)), strconv.Itoa(d), art.ID))
 		})
 	}
 
