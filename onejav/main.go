@@ -21,6 +21,7 @@ import (
 	"github.com/PuerkitoBio/goquery"
 	"github.com/fatih/color"
 	htmlPkg "github.com/laushunyu/spider/html"
+	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
 	"go.uber.org/multierr"
 	"golang.org/x/sync/semaphore"
@@ -48,17 +49,6 @@ func init() {
 	}
 	log.SetLevel(l)
 	log.Debugf("set log level as %s", l)
-
-	// parse arg
-	dateStr := flag.Arg(0)
-	if dateStr == "now" {
-		date = time.Now()
-	} else {
-		date, err = time.Parse("2006-01-02", dateStr)
-		if err != nil {
-			log.Fatalln(err)
-		}
-	}
 }
 
 type Website struct {
@@ -142,6 +132,74 @@ func (a *Artifact) DownloadTo(dir string) error {
 	return nil
 }
 
+func (w *Website) DownloadAllArtifactsByPopularTo(timeRange int, limit int, artsDir string) error {
+	// mkdir
+	if err := os.MkdirAll(artsDir, os.ModePerm); err != nil {
+		log.Fatalln(err)
+	}
+
+	var arts []Artifact
+
+	// get cache from metadata.json
+	mdPath := filepath.Join(artsDir, "metadata.json")
+
+	mdRaw, err := ioutil.ReadFile(mdPath)
+	if err == nil {
+		// file exist, do unmarshal
+		if err := json.Unmarshal(mdRaw, &arts); err != nil {
+			// unmarshal fail, should download from remote
+			log.WithError(err).Warning("metadata broken, will download from remote website page")
+			err = os.ErrNotExist
+		}
+		log.Debugf("load list metadata.json cache success")
+	}
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return err
+		}
+		// not exist, download from website page
+
+		// get artifacts of specify date
+		a, err := w.GetArtifactsByPopular(timeRange, limit)
+		if err != nil {
+			log.Fatalln(err)
+		}
+		arts = a
+
+		artsRaw, err := json.MarshalIndent(a, "", "\t")
+		if err != nil {
+			return err
+		}
+		if err := ioutil.WriteFile(mdPath, artsRaw, 0644); err != nil {
+			return err
+		}
+	}
+
+	// download arts concurrently
+	log.Debugf("start downloading %d arts", len(arts))
+	var errRet error
+	wg, sema := sync.WaitGroup{}, semaphore.NewWeighted(concurrent)
+	for i := range arts {
+		wg.Add(1)
+		art := arts[i]
+
+		go func() {
+			defer wg.Done()
+
+			_ = sema.Acquire(context.TODO(), 1)
+			defer sema.Release(1)
+
+			errRet = multierr.Append(errRet, art.DownloadTo(filepath.Join(artsDir, art.ID)))
+		}()
+	}
+
+	if wg.Wait(); errRet != nil {
+		return err
+	}
+
+	return nil
+}
+
 func (w *Website) DownloadAllArtifactsByDateTo(y, m, d int, artsDir string) error {
 	// mkdir
 	if err := os.MkdirAll(artsDir, os.ModePerm); err != nil {
@@ -208,6 +266,51 @@ func (w *Website) DownloadAllArtifactsByDateTo(y, m, d int, artsDir string) erro
 	}
 
 	return nil
+}
+
+func (w *Website) GetArtifactsByPopular(timeRange int, limit int) (arts []Artifact, err error) {
+	if limit < 0 && limit > 50 {
+		// max 10 page
+		limit = 50
+	}
+
+	u, err := w.baseUrl.Parse(fmt.Sprintf("popular/%d", timeRange))
+	if err != nil {
+		return nil, err
+	}
+
+	for i := 1; i <= 5; i++ {
+		log.Infof("get page %s", u.String())
+		respBody, err := htmlPkg.DoGet(u.String())
+		if err != nil {
+			return arts, err
+		}
+
+		log.Infof("process page %s", u.String())
+		art, next, err := w.GetArtifactsFromHtml(respBody)
+		_ = respBody.Close() // close body
+		if err != nil {
+			return arts, err
+		}
+		arts = append(arts, art...)
+
+		if len(arts) >= limit {
+			return arts, nil
+		}
+
+		// if last page then ret
+		if !next {
+			log.Infof("find %d arts in list page %s", len(arts), u.String())
+			return arts, nil
+		}
+
+		// gen next page query param, next page is (i + 1)
+		param := u.Query()
+		param.Set("page", strconv.Itoa(i+1))
+		u.RawQuery = param.Encode()
+	}
+
+	return
 }
 
 func (w *Website) GetArtifactsByDate(y, m, d int, pageLimit int) (arts []Artifact, err error) {
@@ -330,19 +433,82 @@ func (w *Website) GetArtifactsFromHtml(reader io.Reader) (arts []Artifact, next 
 	return
 }
 
-func main() {
-	_, err := net.LookupHost(host)
-	if err != nil {
-		log.WithError(err).Fatalln("unknown host")
-	}
+func fnTime(website *Website, dataStr string) error {
+	var err error
 
-	website := NewWebsite(host)
+	if dataStr == "now" {
+		date = time.Now()
+	} else {
+		date, err = time.Parse("2006-1-2", dataStr)
+		if err != nil {
+			return err
+		}
+	}
 
 	// output/2022/3/11
 	y, m, d := date.Date()
 	artsDir := filepath.Join(output, strconv.Itoa(y), strconv.Itoa(int(m)), strconv.Itoa(d))
 	if err := website.DownloadAllArtifactsByDateTo(y, int(m), d, artsDir); err != nil {
-		log.Fatalln(err)
+		return err
+	}
+	return nil
+}
+
+func fnPopular(website *Website, timeRangeStr, countStr string) error {
+	if timeRangeStr == "" {
+		timeRangeStr = "7" // 最近七天
+	}
+	if countStr == "" {
+		countStr = "50" // top 50
+	}
+
+	timeRange, err := strconv.Atoi(timeRangeStr)
+	if err != nil {
+		return errors.Errorf("unknown time range %s", timeRangeStr)
+	}
+	if timeRange != 7 && timeRange != 30 && timeRange != 60 {
+		return errors.New("time range must be one of (60, 30, 7)")
+	}
+	count, err := strconv.Atoi(countStr)
+	if err != nil {
+		return errors.Errorf("unknown count %s", countStr)
+	}
+
+	artsDir := filepath.Join(output, fmt.Sprintf("last-%d-top-%d", timeRange, count))
+	if err := website.DownloadAllArtifactsByPopularTo(timeRange, count, artsDir); err != nil {
+		return err
+	}
+	return nil
+}
+
+func main() {
+	_, err := net.LookupHost(host)
+	if err != nil {
+		log.WithError(err).Fatalln("unknown host")
+	}
+	website := NewWebsite(host)
+
+	fn := flag.Arg(0)
+
+	switch fn {
+	case "time":
+		// by time
+		if err := fnTime(website, flag.Arg(1)); err != nil {
+			log.Fatalln(err)
+		}
+	case "tag":
+		// by tag
+
+	case "popular":
+		// by popular
+		if err := fnPopular(website, flag.Arg(1), flag.Arg(2)); err != nil {
+			log.Fatalln(err)
+		}
+	default:
+		// default by time
+		if err := fnTime(website, flag.Arg(0)); err != nil {
+			log.Fatalln(err)
+		}
 	}
 
 	log.Info("success!")

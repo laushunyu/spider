@@ -6,6 +6,7 @@ require (
 	github.com/PuerkitoBio/goquery v1.8.0
 	github.com/fatih/color v1.13.0
 	github.com/laushunyu/spider/html v0.0.0-20220311140359-19405ea299de
+	github.com/pkg/errors v0.9.1
 	github.com/sirupsen/logrus v1.8.1
 	go.uber.org/multierr v1.8.0
 	golang.org/x/sync v0.0.0-20210220032951-036812b2e83c
