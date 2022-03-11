@@ -40,14 +40,20 @@ func DoGet(url string, modifyReq ...func(req *http.Request)) (io.ReadCloser, err
 }
 
 func DoGetDownload(dstPath string, url string, modifyReq ...func(req *http.Request)) error {
+	if _, err := os.Stat(dstPath); err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		// file not exist
+	} else {
+		// overwrite or skip?
+		// now is skipping this file
+		log.Debugf("file %s existed, skip", dstPath)
+		return nil
+	}
+
 	fd, err := os.Create(dstPath)
 	if err != nil {
-		if os.IsExist(err) {
-			// overwrite or skip?
-			// now is skipping this file
-			log.Debugf("file %s existed, skip", dstPath)
-			return nil
-		}
 		return err
 	}
 
@@ -55,7 +61,9 @@ func DoGetDownload(dstPath string, url string, modifyReq ...func(req *http.Reque
 	if err != nil {
 		return err
 	}
-	defer body.Close()
+	defer func() {
+		_ = body.Close()
+	}()
 
 	if _, err := io.Copy(fd, body); err != nil {
 		return err
