@@ -65,6 +65,31 @@ func NewWebsite(host string) *Website {
 	}
 }
 
+type Artifacts []Artifact
+
+func (arts Artifacts) DownloadTo(dir string) error {
+	// download arts concurrently
+	log.Debugf("start downloading %d arts", len(arts))
+	var errRet error
+	wg, sema := sync.WaitGroup{}, semaphore.NewWeighted(concurrent)
+	for i := range arts {
+		wg.Add(1)
+		art := arts[i]
+
+		go func() {
+			defer wg.Done()
+
+			_ = sema.Acquire(context.TODO(), 1)
+			defer sema.Release(1)
+
+			errRet = multierr.Append(errRet, art.DownloadTo(filepath.Join(dir, art.ID)))
+		}()
+	}
+	wg.Wait()
+
+	return errRet
+}
+
 type Artifact struct {
 	ID            string
 	Name          string
@@ -138,7 +163,7 @@ func (w *Website) DownloadAllArtifactsByPopularTo(timeRange int, limit int, arts
 		log.Fatalln(err)
 	}
 
-	var arts []Artifact
+	var arts Artifacts
 
 	// get cache from metadata.json
 	mdPath := filepath.Join(artsDir, "metadata.json")
@@ -175,29 +200,7 @@ func (w *Website) DownloadAllArtifactsByPopularTo(timeRange int, limit int, arts
 		}
 	}
 
-	// download arts concurrently
-	log.Debugf("start downloading %d arts", len(arts))
-	var errRet error
-	wg, sema := sync.WaitGroup{}, semaphore.NewWeighted(concurrent)
-	for i := range arts {
-		wg.Add(1)
-		art := arts[i]
-
-		go func() {
-			defer wg.Done()
-
-			_ = sema.Acquire(context.TODO(), 1)
-			defer sema.Release(1)
-
-			errRet = multierr.Append(errRet, art.DownloadTo(filepath.Join(artsDir, art.ID)))
-		}()
-	}
-
-	if wg.Wait(); errRet != nil {
-		return err
-	}
-
-	return nil
+	return arts.DownloadTo(artsDir)
 }
 
 func (w *Website) DownloadAllArtifactsByDateTo(y, m, d int, artsDir string) error {
@@ -206,7 +209,7 @@ func (w *Website) DownloadAllArtifactsByDateTo(y, m, d int, artsDir string) erro
 		log.Fatalln(err)
 	}
 
-	var arts []Artifact
+	var arts Artifacts
 
 	// get cache from metadata.json
 	mdPath := filepath.Join(artsDir, "metadata.json")
@@ -243,49 +246,46 @@ func (w *Website) DownloadAllArtifactsByDateTo(y, m, d int, artsDir string) erro
 		}
 	}
 
-	// download arts concurrently
-	log.Debugf("start downloading %d arts", len(arts))
-	var errRet error
-	wg, sema := sync.WaitGroup{}, semaphore.NewWeighted(concurrent)
-	for i := range arts {
-		wg.Add(1)
-		art := arts[i]
-
-		go func() {
-			defer wg.Done()
-
-			_ = sema.Acquire(context.TODO(), 1)
-			defer sema.Release(1)
-
-			errRet = multierr.Append(errRet, art.DownloadTo(filepath.Join(artsDir, art.ID)))
-		}()
-	}
-
-	if wg.Wait(); errRet != nil {
-		return err
-	}
-
-	return nil
+	return arts.DownloadTo(artsDir)
 }
 
-func (w *Website) GetArtifactsByPopular(timeRange int, limit int) (arts []Artifact, err error) {
-	if limit < 0 && limit > 50 {
-		// max 10 page
-		limit = 50
+func GetNextPageUrl(u *url.URL) (*url.URL, error) {
+	query := u.Query()
+
+	page := 1
+	if pageParam := query.Get("page"); pageParam != "" {
+		p, err := strconv.Atoi(pageParam)
+		if err != nil {
+			return nil, err
+		}
+		page = p
+	}
+	// gen next page query param, next page is (i + 1)
+	page++
+
+	query.Set("page", strconv.Itoa(page))
+	n := *u
+	n.RawQuery = query.Encode()
+	return &n, nil
+}
+
+// GetArtifactsByUrl get artifacts from base url and next url.
+// next url: url that page param += 1
+func (w *Website) GetArtifactsByUrl(base *url.URL, pageLimit int) (arts Artifacts, err error) {
+	if pageLimit < 0 {
+		pageLimit = math.MaxInt
 	}
 
-	u, err := w.baseUrl.Parse(fmt.Sprintf("popular/%d", timeRange))
-	if err != nil {
-		return nil, err
-	}
-
-	for i := 1; i <= 5; i++ {
+	u := &*base
+	for i := 0; i < pageLimit; i++ {
+		// get page
 		log.Infof("get page %s", u.String())
 		respBody, err := htmlPkg.DoGet(u.String())
 		if err != nil {
 			return arts, err
 		}
 
+		// process page
 		log.Infof("process page %s", u.String())
 		art, next, err := w.GetArtifactsFromHtml(respBody)
 		_ = respBody.Close() // close body
@@ -294,23 +294,34 @@ func (w *Website) GetArtifactsByPopular(timeRange int, limit int) (arts []Artifa
 		}
 		arts = append(arts, art...)
 
-		if len(arts) >= limit {
-			return arts, nil
-		}
-
-		// if last page then ret
+		// if it's the last page then ret
 		if !next {
 			log.Infof("find %d arts in list page %s", len(arts), u.String())
 			return arts, nil
 		}
 
-		// gen next page query param, next page is (i + 1)
-		param := u.Query()
-		param.Set("page", strconv.Itoa(i+1))
-		u.RawQuery = param.Encode()
+		// get next page url
+		u, err = GetNextPageUrl(u)
+		if err != nil {
+			return arts, err
+		}
 	}
 
-	return
+	return arts, nil
+}
+
+func (w *Website) GetArtifactsByPopular(timeRange int, pageLimit int) (arts []Artifact, err error) {
+	if pageLimit < 0 && pageLimit > 5 {
+		// max 10 page
+		pageLimit = 5
+	}
+
+	u, err := w.baseUrl.Parse(fmt.Sprintf("popular/%d", timeRange))
+	if err != nil {
+		return nil, err
+	}
+
+	return w.GetArtifactsByUrl(u, pageLimit)
 }
 
 func (w *Website) GetArtifactsByDate(y, m, d int, pageLimit int) (arts []Artifact, err error) {
@@ -323,34 +334,7 @@ func (w *Website) GetArtifactsByDate(y, m, d int, pageLimit int) (arts []Artifac
 		return nil, err
 	}
 
-	for i := 1; i <= pageLimit; i++ {
-		log.Infof("get page %s", u.String())
-		respBody, err := htmlPkg.DoGet(u.String())
-		if err != nil {
-			return arts, err
-		}
-
-		log.Infof("process page %s", u.String())
-		art, next, err := w.GetArtifactsFromHtml(respBody)
-		_ = respBody.Close() // close body
-		if err != nil {
-			return arts, err
-		}
-		arts = append(arts, art...)
-
-		// if last page then ret
-		if !next {
-			log.Infof("find %d arts in list page %s", len(arts), u.String())
-			return arts, nil
-		}
-
-		// gen next page query param, next page is (i + 1)
-		param := u.Query()
-		param.Set("page", strconv.Itoa(i+1))
-		u.RawQuery = param.Encode()
-	}
-
-	return
+	return w.GetArtifactsByUrl(u, pageLimit)
 }
 
 func (w *Website) GetArtifactsFromHtml(reader io.Reader) (arts []Artifact, next bool, err error) {
@@ -481,6 +465,29 @@ func fnPopular(website *Website, timeRangeStr, countStr string) error {
 	return nil
 }
 
+func fnUrl(website *Website, urlStr string, pageCountStr string) error {
+	if pageCountStr == "" {
+		pageCountStr = "-1" // all
+	}
+
+	pageCount, err := strconv.Atoi(pageCountStr)
+	if err != nil {
+		return errors.Errorf("unknown count %s", pageCountStr)
+	}
+
+	u, err := url.Parse(urlStr)
+	if err != nil {
+		return err
+	}
+
+	arts, err := website.GetArtifactsByUrl(u, pageCount)
+	if err != nil {
+		return err
+	}
+
+	return arts.DownloadTo(filepath.Join(output, "url", u.Path))
+}
+
 func main() {
 	_, err := net.LookupHost(host)
 	if err != nil {
@@ -502,6 +509,11 @@ func main() {
 	case "popular":
 		// by popular
 		if err := fnPopular(website, flag.Arg(1), flag.Arg(2)); err != nil {
+			log.Fatalln(err)
+		}
+	case "url":
+		// by url
+		if err := fnUrl(website, flag.Arg(1), flag.Arg(2)); err != nil {
 			log.Fatalln(err)
 		}
 	default:

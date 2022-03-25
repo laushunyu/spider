@@ -29,6 +29,12 @@ Download by popular:
 onejav -h <xxx>.com popular 7 50 
 ```
 
+Download by url:
+```
+# all aritifact from this page to last page
+onejav -h <xxx>.com https://xxx.com/actress/Kana%20Momonogi 
+```
+
 You can also set `-p <num>` to use <num> goroutine to download concurrently 
 
 ## Q&A
