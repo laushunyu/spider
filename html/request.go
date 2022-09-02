@@ -1,6 +1,7 @@
 package html
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	log "github.com/sirupsen/logrus"
@@ -78,5 +79,11 @@ func WithCookie(k, v string) func(req *http.Request) {
 			Name:  k,
 			Value: v,
 		})
+	}
+}
+
+func WithContext(ctx context.Context) func(req *http.Request) {
+	return func(req *http.Request) {
+		*req = *req.WithContext(ctx)
 	}
 }

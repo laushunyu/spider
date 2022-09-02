@@ -5,18 +5,19 @@ go 1.17
 require (
 	github.com/PuerkitoBio/goquery v1.8.0
 	github.com/fatih/color v1.13.0
-	github.com/laushunyu/spider/html v0.0.0-20220311140359-19405ea299de
-	github.com/pkg/errors v0.9.1
-	github.com/sirupsen/logrus v1.8.1
+	github.com/laushunyu/spider/html v0.0.0-20220902162040-b6cab026eae2
+	github.com/sirupsen/logrus v1.9.0
+	github.com/spf13/cobra v1.5.0
 	go.uber.org/multierr v1.8.0
-	golang.org/x/sync v0.0.0-20210220032951-036812b2e83c
 )
 
 require (
 	github.com/andybalholm/cascadia v1.3.1 // indirect
+	github.com/inconshreveable/mousetrap v1.0.0 // indirect
 	github.com/mattn/go-colorable v0.1.9 // indirect
 	github.com/mattn/go-isatty v0.0.14 // indirect
+	github.com/spf13/pflag v1.0.5 // indirect
 	go.uber.org/atomic v1.7.0 // indirect
 	golang.org/x/net v0.0.0-20210916014120-12bc252f5db8 // indirect
-	golang.org/x/sys v0.0.0-20220310020820-b874c991c1a5 // indirect
+	golang.org/x/sys v0.0.0-20220829200755-d48e67d00261 // indirect
 )
